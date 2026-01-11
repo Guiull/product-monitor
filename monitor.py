@@ -28,8 +28,15 @@ class ProductMonitor:
     def load_notified_products(self):
         """Carrega lista de produtos já notificados"""
         if Path(self.notified_products_file).exists():
-            with open(self.notified_products_file, 'r') as f:
-                return json.load(f)
+            try:
+                with open(self.notified_products_file, 'r') as f:
+                    content = f.read().strip()
+                    if content:
+                        return json.loads(content)
+                    return {}
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning(f"Arquivo de produtos notificados corrompido, criando novo: {e}")
+                return {}
         return {}
     
     def save_notified_products(self):
