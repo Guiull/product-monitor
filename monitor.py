@@ -1,9 +1,6 @@
 import os
 import time
-import smtplib
 import requests
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 from datetime import datetime
 import json
@@ -19,11 +16,16 @@ logger = logging.getLogger(__name__)
 
 class ProductMonitor:
     def __init__(self):
-        self.email_user = os.getenv('EMAIL_USER')
-        self.email_password = os.getenv('EMAIL_PASSWORD')
+        self.resend_api_key = os.getenv('RESEND_API_KEY')
+        self.email_to = os.getenv('EMAIL_TO')  # Email que vai receber os alertas
         self.check_interval = int(os.getenv('CHECK_INTERVAL', 300))  # 5 minutos padrão
         self.notified_products_file = 'notified_products.json'
         self.notified_products = self.load_notified_products()
+        
+        if not self.resend_api_key:
+            logger.warning("RESEND_API_KEY não configurada!")
+        if not self.email_to:
+            logger.warning("EMAIL_TO não configurado!")
         
     def load_notified_products(self):
         """Carrega lista de produtos já notificados"""
@@ -114,19 +116,32 @@ class ProductMonitor:
         
         return products
     
-    def check_keywords(self, product, keywords):
-        """Verifica se o produto contém as keywords"""
-        title_lower = product['title'].lower()
-        return all(keyword.lower() in title_lower for keyword in keywords)
+    def check_keywords(self, product, keywords, exact_match=False):
+        """Verifica se o produto contém as keywords
+        
+        Args:
+            product: Dicionário com informações do produto
+            keywords: Lista de keywords ou string para exact match
+            exact_match: Se True, faz match exato do título completo
+        """
+        title_lower = product['title'].lower().strip()
+        
+        if exact_match:
+            # Match exato: o título deve ser exatamente igual à keyword
+            if isinstance(keywords, str):
+                return title_lower == keywords.lower().strip()
+            else:
+                # Se for lista, verifica se o título é exatamente igual a alguma das keywords
+                return any(title_lower == kw.lower().strip() for kw in keywords)
+        else:
+            # Match parcial: todas as keywords devem estar presentes
+            if isinstance(keywords, str):
+                keywords = [keywords]
+            return all(keyword.lower() in title_lower for keyword in keywords)
     
     def send_email(self, product, keywords_matched):
-        """Envia email de alerta"""
+        """Envia email de alerta via Resend API"""
         try:
-            msg = MIMEMultipart('alternative')
-            msg['Subject'] = f'🚨 Produto Disponível: {product["title"][:50]}...'
-            msg['From'] = self.email_user
-            msg['To'] = self.email_user
-            
             # HTML email
             html = f"""
             <html>
@@ -154,14 +169,27 @@ class ProductMonitor:
             </html>
             """
             
-            msg.attach(MIMEText(html, 'html'))
+            # Envia via Resend API
+            response = requests.post(
+                'https://api.resend.com/emails',
+                headers={
+                    'Authorization': f'Bearer {self.resend_api_key}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'from': 'Monitor <onboarding@resend.dev>',
+                    'to': [self.email_to],
+                    'subject': f'🚨 Produto Disponível: {product["title"][:50]}...',
+                    'html': html
+                }
+            )
             
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-                server.login(self.email_user, self.email_password)
-                server.send_message(msg)
-            
-            logger.info(f"Email enviado para: {product['title']}")
-            return True
+            if response.status_code == 200:
+                logger.info(f"Email enviado com sucesso para: {self.email_to}")
+                return True
+            else:
+                logger.error(f"Erro ao enviar email. Status: {response.status_code}, Response: {response.text}")
+                return False
             
         except Exception as e:
             logger.error(f"Erro ao enviar email: {e}")
@@ -172,6 +200,7 @@ class ProductMonitor:
         url = config['url']
         keywords = config['keywords']
         site_name = config.get('name', 'Site')
+        exact_match = config.get('exact_match', False)
         
         logger.info(f"Verificando {site_name}...")
         
@@ -183,14 +212,14 @@ class ProductMonitor:
         logger.info(f"Encontrados {len(products)} produtos em {site_name}")
         
         for product in products:
-            if self.check_keywords(product, keywords):
+            if self.check_keywords(product, keywords, exact_match=exact_match):
                 product_id = f"{site_name}_{product['title']}"
                 
                 # Verifica se já foi notificado
                 if product_id not in self.notified_products:
                     logger.info(f"Novo produto encontrado: {product['title']}")
                     
-                    if self.send_email(product, keywords):
+                    if self.send_email(product, keywords if isinstance(keywords, list) else [keywords]):
                         self.notified_products[product_id] = {
                             'notified_at': datetime.now().isoformat(),
                             'title': product['title'],
